@@ -10,7 +10,15 @@ const COMMAND = 'code-actions-sample.command';
 export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.languages.registerCodeActionsProvider('markdown', new Emojizer(), {
-			providedCodeActionKinds: Emojizer.providedCodeActionKinds
+			providedCodeActionKinds: Emojizer.providedCodeActionKinds,
+			documentation: [
+				{
+					kind: vscode.CodeActionKind.Refactor, command: {
+						title: 'Docs',
+						command: 'do.the.bla'
+					}
+				}
+			]
 		}));
 
 	const emojiDiagnostics = vscode.languages.createDiagnosticCollection("emoji");
@@ -35,7 +43,8 @@ export function activate(context: vscode.ExtensionContext) {
 export class Emojizer implements vscode.CodeActionProvider {
 
 	public static readonly providedCodeActionKinds = [
-		vscode.CodeActionKind.QuickFix
+		vscode.CodeActionKind.QuickFix,
+		vscode.CodeActionKind.Refactor,
 	];
 
 	public provideCodeActions(document: vscode.TextDocument, range: vscode.Range): vscode.CodeAction[] | undefined {
@@ -69,7 +78,7 @@ export class Emojizer implements vscode.CodeActionProvider {
 	}
 
 	private createFix(document: vscode.TextDocument, range: vscode.Range, emoji: string): vscode.CodeAction {
-		const fix = new vscode.CodeAction(`Convert to ${emoji}`, vscode.CodeActionKind.QuickFix);
+		const fix = new vscode.CodeAction(`Convert to ${emoji}`, vscode.CodeActionKind.Refactor);
 		fix.edit = new vscode.WorkspaceEdit();
 		fix.edit.replace(document.uri, new vscode.Range(range.start, range.start.translate(0, 2)), emoji);
 		return fix;
