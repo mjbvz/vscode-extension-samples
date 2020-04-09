@@ -11,16 +11,140 @@ interface PawDrawEdit {
 	readonly stroke: ReadonlyArray<[number, number]>;
 }
 
+interface PawDrawDocumentDelegate {
+	getFileData(): Promise<Uint8Array>;
+}
+
 /**
  * Define our document type.
  */
-class PawDrawDocument extends vscode.CustomDocument<PawDrawEdit> {
-	constructor(
-		uri: vscode.Uri,
-		public readonly initialContent: Uint8Array,
-	) {
-		super(uri);
+class PawDrawDocument implements vscode.EditableCustomDocument {
+
+	private static readonly backupFolder = 'pawDraw';
+
+	static async create(uri: vscode.Uri, context: vscode.ExtensionContext, _backupId: string | undefined, delegate: PawDrawDocumentDelegate): Promise<PawDrawDocument | PromiseLike<PawDrawDocument>> {
+		// If we have a backup, read that. Otherwise read the resource from the workspace
+		let dataFile = uri;
+
+		// Check for backup first
+		const backupResource = this.getBackupResource(uri, context.storagePath);
+		if (backupResource && await exists(backupResource)) {
+			dataFile = backupResource;
+		}
+
+		const fileData = await vscode.workspace.fs.readFile(dataFile);
+		return new PawDrawDocument(uri, context, fileData, delegate);
 	}
+
+	private readonly _edits: Array<PawDrawEdit> = [];
+
+	private _backupId = 0;
+
+
+	private constructor(
+		public readonly uri: vscode.Uri,
+		private readonly _context: vscode.ExtensionContext,
+
+		public initialContent: Uint8Array,
+		private readonly _delegate: PawDrawDocumentDelegate
+	) { }
+
+	//
+	private readonly _onDidEdit = new vscode.EventEmitter<vscode.CustomDocumentEditEvent>();
+	public readonly onDidEdit = this._onDidEdit.event;
+
+	//
+	private readonly _onDidChange = new vscode.EventEmitter<void>();
+	public readonly onDidChange = this._onDidChange.event;
+
+	private readonly _onDidRevert = new vscode.EventEmitter<void>();
+	public readonly onDidRevert = this._onDidRevert.event;
+
+	public get edits() { return this._edits; }
+
+	dispose(): void {
+		// noop
+	}
+
+	makeEdit(edit: PawDrawEdit) {
+		this._edits.push(edit);
+
+		this._onDidEdit.fire({
+			label: 'Stroke',
+			undo: async () => {
+				this._edits.pop();
+				this._onDidChange.fire();
+			},
+			redo: async () => {
+				this._edits.push(edit);
+				this._onDidChange.fire();
+			}
+		});
+	}
+
+	async save(cancellation: vscode.CancellationToken): Promise<void> {
+		await this.saveAs(this.uri, cancellation);
+	}
+
+	async saveAs(targetResource: vscode.Uri, cancellation: vscode.CancellationToken): Promise<void> {
+		const fileData = await this._delegate.getFileData();
+		if (!cancellation.isCancellationRequested) {
+			await vscode.workspace.fs.writeFile(targetResource, fileData);
+		}
+	}
+
+	async revert(_cancellation: vscode.CancellationToken): Promise<void> {
+		const diskContent = await vscode.workspace.fs.readFile(this.uri);
+		this.initialContent = diskContent;
+		this._onDidRevert.fire();
+	}
+
+	async backup(cancellation: vscode.CancellationToken): Promise<{ backupId: string; dispose(): void; }> {
+		if (!this._context.storagePath) {
+			throw new Error('Cannot backup');
+		}
+
+		const backupId = this._backupId++;
+		console.log(`backup: ${backupId}`);
+
+		const dir = path.join(this._context.storagePath, PawDrawDocument.backupFolder);
+		await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir));
+
+		const backupResource = PawDrawDocument.getBackupResource(this.uri, this._context.storagePath);
+		if (backupResource) {
+			await this.saveAs(backupResource, cancellation);
+		}
+		return {
+			backupId: `${backupId}`,
+			dispose: () => {
+				console.log(`delete backup ${backupId}`);
+				this.deleteBackup();
+			}
+		}
+	}
+
+	private static getBackupResource(uri: vscode.Uri, storagePath: string | undefined): vscode.Uri | undefined {
+		if (!storagePath) {
+			return undefined;
+		}
+		const dir = path.join(storagePath, PawDrawDocument.backupFolder);
+		const fileName = crypto.createHash('sha256').update(uri.toString(), 'utf8').digest('hex');
+		return vscode.Uri.file(path.join(dir, fileName));
+	}
+
+	private async deleteBackup() {
+		const backupResource = PawDrawDocument.getBackupResource(this.uri, this._context.storagePath!);
+		if (!backupResource) {
+			return;
+		}
+
+		try {
+			await vscode.workspace.fs.delete(backupResource);
+		} catch {
+			// noop
+		}
+	}
+
 }
 
 /**
@@ -38,10 +162,10 @@ class PawDrawDocument extends vscode.CustomDocument<PawDrawEdit> {
  * - Implementing save, undo, redo, and revert.
  * - Backing up a custom editor.
  */
-export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDrawEdit>, vscode.CustomEditorEditingDelegate<PawDrawEdit> {
+export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDrawDocument> {
 
 	public static register(context: vscode.ExtensionContext): vscode.Disposable {
-		return vscode.window.registerCustomEditorProvider(
+		return vscode.window.registerCustomEditorProvider2(
 			PawDrawEditorProvider.viewType,
 			new PawDrawEditorProvider(context),
 			{
@@ -61,8 +185,6 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 	 */
 	private readonly webviews = new WebviewCollection();
 
-	private readonly backupFolder = 'pawDraw';
-
 	constructor(
 		private readonly _context: vscode.ExtensionContext
 	) { }
@@ -72,19 +194,38 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 
 	async openCustomDocument(
 		uri: vscode.Uri,
+		openContext: { backupId?: string },
 		_token: vscode.CancellationToken
-	): Promise<vscode.CustomDocument<PawDrawEdit>> {
-		// Check for backup first
-		const backupResource = this.getBackupResource(uri);
+	): Promise<PawDrawDocument> {
+		const document = await PawDrawDocument.create(uri, this._context, openContext.backupId, {
+			getFileData: async () => {
+				const webviewsForDocument: any = Array.from(this.webviews.get(document.uri));
+				if (!webviewsForDocument.length) {
+					throw new Error('Could not find webview to save for');
+				}
+				const panel = webviewsForDocument[0];
+				const response = await this.postMessageWithResponse<{ data: number[] }>(panel, 'getFileData', {});
+				return new Uint8Array(response.data);
+			}
+		});
 
-		// If we have a backup, read that. Otherwise read the resource from the workspace
-		let dataFile = uri;
-		if (backupResource && await exists(backupResource)) {
-			dataFile = backupResource;
-		}
+		document.onDidChange(() => {
+			for (const webviewPanel of this.webviews.get(document.uri)) {
+				this.postMessage(webviewPanel, 'update', {
+					edits: document.edits,
+				});
+			}
+		});
 
-		const fileData = await vscode.workspace.fs.readFile(dataFile);
-		return new PawDrawDocument(uri, fileData);
+		document.onDidRevert(() => {
+			for (const webviewPanel of this.webviews.get(document.uri)) {
+				this.postMessage(webviewPanel, 'init', {
+					value: document.initialContent
+				});
+			}
+		})
+
+		return document;
 	}
 
 	async resolveCustomEditor(
@@ -162,101 +303,6 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 			</html>`;
 	}
 
-	// #region CustomEditorEditingDelegate
-
-	private readonly _onDidEdit = new vscode.EventEmitter<vscode.CustomDocumentEditEvent<PawDrawEdit>>();
-	public readonly onDidEdit = this._onDidEdit.event;
-
-	async save(document: PawDrawDocument, _cancellation: vscode.CancellationToken): Promise<void> {
-		await this.saveAs(document, document.uri);
-		this.deleteBackup(document);
-	}
-
-	async saveAs(document: PawDrawDocument, targetResource: vscode.Uri): Promise<void> {
-		const webviews = Array.from(this.webviews.get(document.uri));
-		if (!webviews.length) {
-			throw new Error('Could not find webview to save for');
-		}
-		const panel = webviews[0];
-		const response = await this.postMessageWithResponse<{ data: number[] }>(panel, 'getFileData', {});
-		const fileData = new Uint8Array(response.data);
-		vscode.workspace.fs.writeFile(targetResource, fileData);
-	}
-
-	async applyEdits(document: PawDrawDocument, _edits: readonly PawDrawEdit[]): Promise<void> {
-		this.updateWebviews(document);
-
-		if (document.appliedEdits.length === document.savedEdits.length) {
-			this.deleteBackup(document);
-		}
-	}
-
-	async undoEdits(document: PawDrawDocument, _edits: readonly PawDrawEdit[]): Promise<void> {
-		this.updateWebviews(document);
-
-		if (document.appliedEdits.length === document.savedEdits.length) {
-			this.deleteBackup(document);
-		}
-	}
-
-	async revert(document: PawDrawDocument, _edits: vscode.CustomDocumentRevert<PawDrawEdit>): Promise<void> {
-		this.updateWebviews(document);
-		this.deleteBackup(document);
-
-		const diskContent = await vscode.workspace.fs.readFile(document.uri);
-		for (const webviewPanel of this.webviews.get(document.uri)) {
-			this.postMessage(webviewPanel, 'init', {
-				value: diskContent
-			});
-		}
-	}
-
-	async backup(document: PawDrawDocument, _cancellation: vscode.CancellationToken): Promise<void> {
-		if (!this._context.storagePath) {
-			return;
-		}
-
-		const dir = path.join(this._context.storagePath, this.backupFolder);
-		await vscode.workspace.fs.createDirectory(vscode.Uri.file(dir));
-
-		const backupResource = this.getBackupResource(document.uri);
-		if (backupResource) {
-			await this.saveAs(document, backupResource);
-		}
-	}
-
-	private getBackupResource(uri: vscode.Uri): vscode.Uri | undefined {
-		if (!this._context.storagePath) {
-			return undefined;
-		}
-		const dir = path.join(this._context.storagePath, this.backupFolder);
-		const fileName = crypto.createHash('sha256').update(uri.toString(), 'utf8').digest('hex');
-
-		return vscode.Uri.file(path.join(dir, fileName));
-	}
-
-	private async deleteBackup(document: PawDrawDocument) {
-		const backupResource = this.getBackupResource(document.uri);
-		if (!backupResource) {
-			return;
-		}
-
-		try {
-			await vscode.workspace.fs.delete(backupResource);
-		} catch {
-			// noop
-		}
-	}
-
-	// #endregion
-
-	public updateWebviews(document: PawDrawDocument) {
-		for (const webviewPanel of this.webviews.get(document.uri)) {
-			this.postMessage(webviewPanel, 'update', {
-				edits: document.appliedEdits,
-			});
-		}
-	}
 
 	private _requestId = 1;
 	private readonly _callbacks = new Map<number, (response: any) => void>();
@@ -275,18 +321,7 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 	private onMessage(document: PawDrawDocument, message: any) {
 		switch (message.type) {
 			case 'stroke':
-				// Tell VS Code that an edit has ocurred
-				this._onDidEdit.fire({
-					document,
-					label: "Stroke",
-					edit: {
-						color: message.color,
-						stroke: message.stroke,
-					},
-				});
-
-				// Make sure other webviews also know about this
-				this.updateWebviews(document);
+				document.makeEdit(message as PawDrawEdit);
 				return;
 
 			case 'response':
