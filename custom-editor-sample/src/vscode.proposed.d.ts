@@ -822,21 +822,6 @@ declare module 'vscode' {
 
 	//#endregion
 
-	//#region Joao: SCM Input Box
-
-	/**
-	 * Represents the input box in the Source Control viewlet.
-	 */
-	export interface SourceControlInputBox {
-
-		/**
-		 * Controls whether the input box is visible (default is `true`).
-		 */
-		visible: boolean;
-	}
-
-	//#endregion
-
 	//#region Terminal data write event https://github.com/microsoft/vscode/issues/78502
 
 	export interface TerminalDataWriteEvent {
@@ -891,28 +876,6 @@ declare module 'vscode' {
 		 * created.
 		 */
 		readonly dimensions: TerminalDimensions | undefined;
-	}
-
-	//#endregion
-
-	//#region Terminal link handlers https://github.com/microsoft/vscode/issues/91606
-
-	export namespace window {
-		/**
-		 * Register a [TerminalLinkHandler](#TerminalLinkHandler) that can be used to intercept and
-		 * handle links that are activated within terminals.
-		 */
-		export function registerTerminalLinkHandler(handler: TerminalLinkHandler): Disposable;
-	}
-
-	export interface TerminalLinkHandler {
-		/**
-		 * Handles a link that is activated within the terminal.
-		 *
-		 * @return Whether the link was handled, if the link was handled this link will not be
-		 * considered by any other extension or by the default built-in link handler.
-		 */
-		handleLink(terminal: Terminal, link: string): ProviderResult<boolean>;
 	}
 
 	//#endregion
@@ -1206,27 +1169,61 @@ declare module 'vscode' {
 	}
 
 	/**
-	 * Event triggered by extensions to signal to VS Code that an edit has occurred on a [`EditableCustomDocument`](#EditableCustomDocument).
+	 * Event triggered by extensions to signal to VS Code that an edit has occurred on an [`EditableCustomDocument`](#EditableCustomDocument).
+	 *
+	 * @see [`EditableCustomDocument.onDidChange`](#EditableCustomDocument.onDidChange).
 	 */
 	interface CustomDocumentEditEvent {
 		/**
 		 * Undo the edit operation.
 		 *
-		 * This is invoked by VS Code when the user invokes undo.
+		 * This is invoked by VS Code when the user triggers an undo.
 		 */
-		undo(): Thenable<void>;
+		undo(): Thenable<void> | void;
 
 		/**
 		 * Redo the edit operation.
 		 *
-		 * This is invoked by VS Code when the user invokes redo.
+		 * This is invoked by VS Code when the user triggers a redo.
 		 */
-		redo(): Thenable<void>;
+		redo(): Thenable<void> | void;
 
 		/**
 		 * Display name describing the edit.
+		 *
+		 * This is shown in the UI to users.
 		 */
 		readonly label?: string;
+	}
+
+	/**
+	 * Event triggered by extensions to signal to VS Code that the content of a [`EditableCustomDocument`](#EditableCustomDocument)
+	 * has changed.
+	 *
+	 * @see [`EditableCustomDocument.onDidChange`](#EditableCustomDocument.onDidChange).
+	 */
+	interface CustomDocumentContentChangeEvent {
+		// marker interface
+	}
+
+	/**
+	 * A backup for an [`EditableCustomDocument`](#EditableCustomDocument).
+	 */
+	interface CustomDocumentBackup {
+		/**
+		 * Unique identifier for the backup.
+		 *
+		 * This id is passed back to your extension in `openCustomDocument` when opening a custom editor from a backup.
+		 */
+		readonly backupId: string;
+
+		/**
+		 * Dispose of the current backup.
+		 *
+		 * This is called by VS Code when it is clear the current backup, such as when a new backup is made or when the
+		 * file is saved.
+		 */
+		dispose(): void;
 	}
 
 	/**
@@ -1234,8 +1231,6 @@ declare module 'vscode' {
 	 *
 	 * `EditableCustomDocument` is how custom editors hook into standard VS Code operations such as save and undo. The
 	 * document is also how custom editors notify VS Code that an edit has taken place.
-	 *
-	 * TODO: document lifecycle of editors and dirty
 	 */
 	interface EditableCustomDocument extends CustomDocument {
 		/**
@@ -1273,10 +1268,23 @@ declare module 'vscode' {
 		 * Signal that an edit has occurred inside a custom editor.
 		 *
 		 * This event must be fired by your extension whenever an edit happens in a custom editor. An edit can be
-		 * anything from changing some text, to cropping an image, to reordering a list.  Your extension is free to
+		 * anything from changing some text, to cropping an image, to reordering a list. Your extension is free to
 		 * define what an edit is and what data is stored on each edit.
+		 *
+		 * Firing `onDidChange` causes VS Code to mark the editors as being dirty. This is cleared when the user either
+		 * saves or reverts the file.
+		 *
+		 * Editors that support undo/redo must fire a `CustomDocumentEditEvent` whenever an edit happens. This allows
+		 * users to undo and redo the edit using VS Code's standard VS Code keyboard shortcuts. VS Code will also mark
+		 * the editor as no longer being dirty if the user undoes all edits to the last saved state.
+		 *
+		 * Editors that support editing but cannot use VS Code's standard undo/redo mechanism must fire a `CustomDocumentContentChangeEvent`.
+		 * The only way for a user to clear the dirty state of an editor that does not support undo/redo is to either
+		 * `save` or `revert` the file.
+		 *
+		 * An editor should only ever fire `CustomDocumentEditEvent` events, or only ever fire `CustomDocumentContentChangeEvent` events.
 		 */
-		readonly onDidEdit: Event<CustomDocumentEditEvent>;
+		readonly onDidChange: Event<CustomDocumentEditEvent> | Event<CustomDocumentContentChangeEvent>;
 
 		/**
 		 * Revert a custom editor to its last saved state.
@@ -1310,13 +1318,25 @@ declare module 'vscode' {
 		 * made in quick succession, `backup` is only triggered after the last one. `backup` is not invoked when
 		 * `auto save` is enabled (since auto save already persists resource ).
 		 *
-		 * @param document Document to backup.
 		 * @param cancellation Token that signals the current backup since a new backup is coming in. It is up to your
 		 * extension to decided how to respond to cancellation. If for example your extension is backing up a large file
 		 * in an operation that takes time to complete, your extension may decide to finish the ongoing backup rather
 		 * than cancelling it to ensure that VS Code has some valid backup.
 		 */
-		backup(cancellation: CancellationToken): Thenable<{ backupId: string, dispose(): void }>;
+		backup(cancellation: CancellationToken): Thenable<CustomDocumentBackup>;
+	}
+
+	/**
+	 * Additional information about the opening custom document.
+	 */
+	interface OpenCustomDocumentContext {
+		/**
+		 * The id of the backup to restore the document from or `undefined` if there is no backup.
+		 *
+		 * If this is provided, your extension should restore the editor from the backup instead of reading the file
+		 * the user's workspace.
+		 */
+		readonly backupId?: string;
 	}
 
 	/**
@@ -1328,7 +1348,7 @@ declare module 'vscode' {
 	 * You should use this type of custom editor when dealing with binary files or more complex scenarios. For simple
 	 * text based documents, use [`CustomTextEditorProvider`](#CustomTextEditorProvider) instead.
 	 *
-	 * @param EditType Type of edits used by the editors of this provider.
+	 * @param DocumentType Type of the custom document returned by this provider.
 	 */
 	export interface CustomEditorProvider<DocumentType extends CustomDocument = CustomDocument> {
 
@@ -1341,11 +1361,12 @@ declare module 'vscode' {
 		 * this point will trigger another call to `openCustomDocument`.
 		 *
 		 * @param uri Uri of the document to open.
+		 * @param openContext Additional information about the opening custom document.
 		 * @param token A cancellation token that indicates the result is no longer needed.
 		 *
 		 * @return The custom document.
 		 */
-		openCustomDocument(uri: Uri, context: { backupId?: string }, token: CancellationToken): Thenable<DocumentType> | DocumentType;
+		openCustomDocument(uri: Uri, openContext: OpenCustomDocumentContext, token: CancellationToken): Thenable<DocumentType> | DocumentType;
 
 		/**
 		 * Resolve a custom editor for a given resource.
@@ -1374,6 +1395,19 @@ declare module 'vscode' {
 			provider: CustomEditorProvider,
 			options?: {
 				readonly webviewOptions?: WebviewPanelOptions;
+
+				/**
+				 * Indicates that the provider allows multiple editor instances to be open at the same time for
+				 * the same resource.
+				 *
+				 * If not set, VS Code only allows one editor instance to be open at a time for each resource. If the
+				 * user tries to open a second editor instance for the resource, the first one is instead moved to where
+				 * the second one was to be opened.
+				 *
+				 * When set, users can split and create copies of the custom editor. The custom editor must make sure it
+				 * can properly synchronize the states of all editor instances for a resource so that they are consistent.
+				 */
+				readonly supportsMultipleEditorsPerResource?: boolean;
 			}
 		): Disposable;
 	}
@@ -1486,6 +1520,13 @@ declare module 'vscode' {
 
 	export type CellOutput = CellStreamOutput | CellErrorOutput | CellDisplayOutput;
 
+	export enum NotebookCellRunState {
+		Running = 1,
+		Idle = 2,
+		Success = 3,
+		Error = 4
+	}
+
 	export interface NotebookCellMetadata {
 		/**
 		 * Controls if the content of a cell is editable or not.
@@ -1502,6 +1543,16 @@ declare module 'vscode' {
 		 * The order in which this cell was executed.
 		 */
 		executionOrder?: number;
+
+		/**
+		 * A status message to be shown in the cell's status bar
+		 */
+		statusMessage?: string;
+
+		/**
+		 * The cell's current run state
+		 */
+		runState?: NotebookCellRunState;
 	}
 
 	export interface NotebookCell {
@@ -1902,64 +1953,25 @@ declare module 'vscode' {
 
 	//#endregion
 
-	//#region https://github.com/microsoft/vscode/issues/90208
-
-	export interface ExtensionContext {
-		/**
-		 * @deprecated THIS API PROPOSAL WILL BE DROPPED
-		 */
-		asExtensionUri(relativePath: string): Uri;
-
-		/**
-		 * The uri of the directory containing the extension.
-		 */
-		readonly extensionUri: Uri;
-	}
-
-	export interface Extension<T> {
-		/**
-		 * @deprecated THIS API PROPOSAL WILL BE DROPPED
-		 */
-		asExtensionUri(relativePath: string): Uri;
-
-		/**
-		 * The uri of the directory containing the extension.
-		 */
-		readonly extensionUri: Uri;
-	}
-
-	export namespace Uri {
-
-		/**
-		 * Create a new uri which path is the result of joining
-		 * the path of the base uri with the provided path segments.
-		 *
-		 * - Note 1: `joinPath` only affects the path component
-		 * and all other components (scheme, authority, query, and fragment) are
-		 * left as they are.
-		 * - Note 2: The base uri must have a path; an error is thrown otherwise.
-		 *
-		 * The path segments are normalized in the following ways:
-		 * - sequences of path separators (`/` or `\`) are replaced with a single separator
-		 * - for `file`-uris on windows, the backslash-character (`\`) is considered a path-separator
-		 * - the `..`-segment denotes the parent segment, the `.` denotes the current segement
-		 * - paths have a root which always remains, for instance on windows drive-letters are roots
-		 * so that is true: `joinPath(Uri.file('file:///c:/root'), '../../other').fsPath === 'c:/other'`
-		 *
-		 * @param base An uri. Must have a path.
-		 * @param pathSegments One more more path fragments
-		 * @returns A new uri which path is joined with the given fragments
-		 */
-		export function joinPath(base: Uri, ...pathSegments: string[]): Uri;
-	}
-
-	//#endregion
-
 	//#region https://github.com/microsoft/vscode/issues/91541
 
 	export enum CompletionItemKind {
 		User = 25,
 		Issue = 26,
+	}
+
+	//#endregion
+
+	//#region https://github.com/microsoft/vscode/issues/94637
+
+	export interface SignatureInformation {
+
+		/**
+		 * The index of the active parameter.
+		 *
+		 * If provided, this is used in place of `SignatureHelp.activeSignature`.
+		 */
+		activeParameter?: number;
 	}
 
 	//#endregion

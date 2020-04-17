@@ -50,12 +50,12 @@ class PawDrawDocument implements vscode.EditableCustomDocument {
 	) { }
 
 	//
-	private readonly _onDidEdit = new vscode.EventEmitter<vscode.CustomDocumentEditEvent>();
-	public readonly onDidEdit = this._onDidEdit.event;
+	private readonly _onDidChange = new vscode.EventEmitter<vscode.CustomDocumentEditEvent>();
+	public readonly onDidChange = this._onDidChange.event;
 
 	//
-	private readonly _onDidChange = new vscode.EventEmitter<void>();
-	public readonly onDidChange = this._onDidChange.event;
+	private readonly _onDidChangeDocument = new vscode.EventEmitter<void>();
+	public readonly onDidChangeDocument = this._onDidChangeDocument.event;
 
 	private readonly _onDidRevert = new vscode.EventEmitter<void>();
 	public readonly onDidRevert = this._onDidRevert.event;
@@ -69,15 +69,15 @@ class PawDrawDocument implements vscode.EditableCustomDocument {
 	makeEdit(edit: PawDrawEdit) {
 		this._edits.push(edit);
 
-		this._onDidEdit.fire({
+		this._onDidChange.fire({
 			label: 'Stroke',
 			undo: async () => {
 				this._edits.pop();
-				this._onDidChange.fire();
+				this._onDidChangeDocument.fire();
 			},
 			redo: async () => {
 				this._edits.push(edit);
-				this._onDidChange.fire();
+				this._onDidChangeDocument.fire();
 			}
 		});
 	}
@@ -120,7 +120,7 @@ class PawDrawDocument implements vscode.EditableCustomDocument {
 				console.log(`delete backup ${backupId}`);
 				this.deleteBackup();
 			}
-		}
+		};
 	}
 
 	private static getBackupResource(uri: vscode.Uri, storagePath: string | undefined): vscode.Uri | undefined {
@@ -174,7 +174,8 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 				// unless is absolutely required as it does have memory overhead.
 				webviewOptions: {
 					retainContextWhenHidden: true,
-				}
+				},
+				supportsMultipleEditorsPerResource: true,
 			});
 	}
 
@@ -209,7 +210,7 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 			}
 		});
 
-		document.onDidChange(() => {
+		document.onDidChangeDocument(() => {
 			for (const webviewPanel of this.webviews.get(document.uri)) {
 				this.postMessage(webviewPanel, 'update', {
 					edits: document.edits,
@@ -223,7 +224,7 @@ export class PawDrawEditorProvider implements vscode.CustomEditorProvider<PawDra
 					value: document.initialContent
 				});
 			}
-		})
+		});
 
 		return document;
 	}
