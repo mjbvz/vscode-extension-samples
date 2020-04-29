@@ -31,7 +31,7 @@ class PawDrawDocument implements vscode.CustomDocument {
 
 		// Check for backup first
 		if (typeof backupId === 'string') {
-			dataFile = vscode.Uri.file(backupId);
+			dataFile = vscode.Uri.parse(backupId);
 		}
 
 		const fileData = await vscode.workspace.fs.readFile(dataFile);
